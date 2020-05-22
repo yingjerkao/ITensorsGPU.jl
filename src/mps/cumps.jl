@@ -1,7 +1,7 @@
 function cuMPS(psi::MPS)
     phi = copy(psi)
     for site in 1:length(psi)
-        phi.A_[site] = cuITensor(psi.A_[site])
+        phi.data[site] = cuITensor(psi.data[site])
     end
     return phi
 end
@@ -20,7 +20,7 @@ function cuMPS(sites) # random MPS
       v[ii] = cuITensor(l[ii-1],s,l[ii])
     end
   end
-  return MPS(N,v,0,N+1)
+  return MPS(v,0,N+1)
 end
 
 function randomCuMPS(sites)
@@ -29,38 +29,41 @@ function randomCuMPS(sites)
     randn!(M[i])
     normalize!(M[i])
   end
-  M.llim_ = 1
-  M.rlim_ = length(M)
+  M.llim = 1
+  M.rlim = length(M)
   return M
 end
 
-function productCuMPS(ivals::Vector{IndexVal})
+function productCuMPS(::Type{T}, ivals::Vector{<:IndexVal}) where {T<:Number}
   N     = length(ivals)
   As    = Vector{ITensor}(undef,N)
   links = Vector{Index}(undef,N)
   for n=1:N
-    s = ind(ivals[n])
+    s = ITensors.ind(ivals[n])
     links[n] = Index(1,"Link,l=$n")
     if n == 1
-      A = ITensor(s,links[n])
+      A = ITensor(T, s, links[n])
       A[ivals[n],links[n](1)] = 1.0
     elseif n == N
-      A = ITensor(links[n-1],s)
+      A = ITensor(T, links[n-1], s)
       A[links[n-1](1),ivals[n]] = 1.0
     else
-      A = ITensor(links[n-1],s,links[n])
+      A = ITensor(T, links[n-1], s, links[n])
       A[links[n-1](1),ivals[n],links[n](1)] = 1.0
     end
     As[n] = cuITensor(A)
   end
-  return MPS(N,As,0,2)
+  return MPS(As,0,2)
 end
+productCuMPS(ivals::Vector{<:IndexVal}) = productCuMPS(Float64, ivals)
 
-function productCuMPS(sites,
-                      states)
+function productCuMPS(::Type{T}, sites,
+                      states) where {T<:Number}
   if length(sites) != length(states)
     throw(DimensionMismatch("Number of sites and and initial states don't match"))
   end
   ivals = [state(sites[n],states[n]) for n=1:length(sites)]
-  return productCuMPS(ivals)
+  return productCuMPS(T, ivals)
 end
+
+productCuMPS(sites, states) = productCuMPS(Float64, sites, states)

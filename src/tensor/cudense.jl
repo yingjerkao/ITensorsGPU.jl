@@ -1,8 +1,8 @@
 const CuDense{ElT,VecT}                 = Dense{ElT,VecT} where {VecT<:CuVector}
 const CuDenseTensor{ElT,N,StoreT,IndsT} = Tensor{ElT,N,StoreT,IndsT} where {StoreT<:CuDense}
 
-Dense{T, SA}(x::Dense{T, SB}) where {T<:Number, SA<:CuArray, SB<:Array} = Dense{T, S}(CuArray(x))
-Dense{T, SA}(x::Dense{T, SB}) where {T<:Number, SA<:Array, SB<:CuArray} = Dense{T, S}(collect(x.data))
+Dense{T, SA}(x::Dense{T, SB}) where {T<:Number, SA<:CuArray, SB<:Array} = Dense{T, SA}(CuArray(x))
+Dense{T, SA}(x::Dense{T, SB}) where {T<:Number, SA<:Array, SB<:CuArray} = Dense{T, SA}(collect(x.data))
 Dense{T, S}(size::Integer) where {T, S<:CuArray{<:T}} = Dense{T, S}(CuArrays.zeros(T, size))
 function Dense{T, S}(x::T, size::Integer) where {T, S<:CuArray{<:T}}
     arr = CuArray{T}(undef, size)
@@ -10,12 +10,17 @@ function Dense{T, S}(x::T, size::Integer) where {T, S<:CuArray{<:T}}
     Dense{T, S}(arr)
 end
 Base.collect(x::CuDense{T}) where {T<:Number} = Dense(collect(x.data))
+Base.complex(::Type{Dense{ElT, VT}}) where {ElT, VT<:CuArray} = Dense{complex(ElT),CuVector{complex(ElT), Nothing}}
+
+CuArrays.CuArray(x::CuDense{ElT}) where {ElT} = CuVector{ElT}(data(x))
+CuArrays.CuArray{ElT, N}(x::CuDenseTensor{ElT, N}) where {ElT, N} = CuArray{ElT, N}(reshape(data(store(x)), dims(inds(x))))
+CuArrays.CuArray(x::CuDenseTensor{ElT, N}) where {ElT, N} = CuArray{ElT, N}(x)
 
 *(D::Dense{T, AT},x::S) where {T,AT<:CuArray,S<:Number} = Dense(x .* data(D))
 
 Base.:(==)(::Type{<:CuDense{ElT1,CVec1}}, ::Type{<:CuDense{ElT2,CVec2}}) where {ElT1,ElT2,CVec1,CVec2} = (ElT1 == ElT2)
-Base.getindex(D::CuDense)       = collect(data(D))[]
-Base.getindex(D::CuDenseTensor) = store(D)[]
+Base.getindex(D::CuDense{<:Number})       = collect(data(D))[]
+Base.getindex(D::CuDenseTensor{<:Number, 0}) = store(D)[]
 LinearAlgebra.norm(T::CuDenseTensor) = norm(data(store(T)))
 
 # This is for type promotion for Scalar*Dense
@@ -34,14 +39,10 @@ function Base.permutedims(T::CuDenseTensor{<:Number,N},
   return Tp
 end
 
-function Base.permutedims!(B::CuDenseTensor{<:Number, N},
-                           A::CuDenseTensor{<:Number, N},
-                           perm,
-                           f::Function) where {N} #(r,t)->permute!(r,t)) where {N}
-  Ais = inds(A)
-  Bis = permute(inds(A), perm)
-  Cs  = f(B, A)
-  return Tensor(Dense(vec(Cs)), Bis) 
+function Base.permutedims!(R::CuDenseTensor{<:Number,N},
+                           T::CuDenseTensor{<:Number,N},
+                           perm::NTuple{N,Int}) where {N}
+    return permutedims!!(R, T, perm)
 end
 
 function permutedims!!(B::Tensor{ElT,N,StoreT,IndsB},
@@ -52,31 +53,6 @@ function permutedims!!(B::Tensor{ElT,N,StoreT,IndsB},
   Bis = permute(inds(A), perm)
   B = f(B, A)
   return B
-end
-
-function Base.permute!(B::CuDenseTensor, A::CuDenseTensor)
-  Ais = inds(A)
-  Bis = inds(B)
-  ind_dict = Vector{Index}()
-  for (idx, i) in enumerate(Ais)
-      push!(ind_dict, i)
-  end
-  Adata = data(store(A))
-  Bdata = data(store(B))
-  reshapeBdata = reshape(Bdata,dims(Bis))
-  reshapeAdata = reshape(Adata,dims(Ais))
-  ctainds = zeros(Int, length(Ais))
-  ctbinds = zeros(Int, length(Bis))
-  for (ii, ia) in enumerate(Ais)
-      ctainds[ii] = findfirst(x->x==ia, ind_dict)
-  end
-  for (ii, ib) in enumerate(Bis)
-      ctbinds[ii] = findfirst(x->x==ib, ind_dict)
-  end
-  
-  CuArrays.CUTENSOR.permutation!(one(eltype(Adata)), reshapeAdata, Vector{Char}(ctainds), reshapeBdata, Vector{Char}(ctbinds)) 
-  copyto!(B.store.data, reshape(reshapeBdata, length(B.store.data)))
-  return vec(reshapeBdata) 
 end
 
 function Base.similar(::Type{<:CuDenseTensor{ElT}},
@@ -93,14 +69,6 @@ function outer!(R::CuDenseTensor,
   copyto!(data(store(R)), vec(R_dat)) 
   inds_outer = unioninds(inds(T1),inds(T2))
   return R
-end
-
-# TODO: call outer!!, make this generic
-function outer(T1::CuDenseTensor{ElT1},
-               T2::CuDenseTensor{ElT2}) where {ElT1,ElT2}
-  array_outer = vec(array(T1))*transpose(vec(array(T2)))
-  inds_outer = unioninds(inds(T1),inds(T2))
-  return Tensor(Dense{promote_type(ElT1,ElT2)}(vec(array_outer)),inds_outer)
 end
 
 function contract!!(R::CuDenseTensor{<:Number,NR},
@@ -136,23 +104,24 @@ function permutedims!!(B::CuDenseTensor{ElT,0},
                        A::CuDenseTensor{ElT,0},
                        perm::NTuple{0,Int},
                        f=(r,t)->permute!(r,t)) where {ElT<:Number}
-  Cs = f(B, A)
-  return Tensor(Dense(vec(Cs)), IndexSet{0}()) 
+    Cs = f(B, A)
+    return Tensor(Dense(vec(Cs)), IndexSet{0}()) 
 end
 
 function permutedims!!(B::CuDenseTensor{ElT,N},
                        A::CuDenseTensor{ElT,0},
                        perm::NTuple{N,Int},
                        f=(r,t)->permute!(r,t)) where {N, ElT<:Number}
-  Cis = permute(inds(B), perm)
-  Cs = f(B, A)
-  return Tensor(Dense(vec(Cs)), Cis) 
+    Cis = permute(inds(B), perm)
+    Cs = f(B, A)
+    return Tensor(Dense(vec(Cs)), Cis) 
 end
 
 function _contract!(CT::CuDenseTensor{El,NC},
                     AT::CuDenseTensor{El,NA},
                     BT::CuDenseTensor{El,NB},
-                    props::ContractionProperties) where {El,NC,NA,NB}
+                    props::ContractionProperties,
+                    α::Number=one(El),β::Number=zero(El)) where {El,NC,NA,NB}
   Ainds = inds(AT)
   Adims = dims(Ainds)
   Binds = inds(BT)
@@ -191,10 +160,54 @@ function _contract!(CT::CuDenseTensor{El,NC},
   for (ii, ic) in enumerate(Cinds)
       ctcinds[ii] = findfirst(x->x==ic, ind_dict)
   end
-  
-  id_op = CuArrays.CUTENSOR.CUTENSOR_OP_IDENTITY
-  CuArrays.CUTENSOR.contraction!(one(El), Adata, Vector{Char}(ctainds), id_op, Bdata, Vector{Char}(ctbinds), id_op, zero(El), Cdata, Vector{Char}(ctcinds), id_op, id_op)
-  copyto!(CT.store.data, vec(Cdata))
+  id_op    = CuArrays.CUTENSOR.CUTENSOR_OP_IDENTITY
+  dict_key = ""
+  for cc in zip(ctcinds, Cdims)
+      dict_key *= string(cc[1]) * "," * string(cc[2]) * ","
+  end 
+  for aa in zip(ctainds, Adims)
+      dict_key *= string(aa[1]) * "," * string(aa[2]) * ","
+  end 
+  for bb in zip(ctbinds, Bdims)
+      dict_key *= string(bb[1]) * "," * string(bb[2]) * ","
+  end
+  if haskey(ENV, "CUTENSOR_AUTOTUNE") && tryparse(Int, ENV["CUTENSOR_AUTOTUNE"]) == 1
+      if haskey(ContractionPlans, dict_key)
+          dict_val = ContractionPlans[dict_key]
+          algo  = dict_val
+          #plan  = dict_val[2]
+          Cdata = CuArrays.CUTENSOR.contraction!(α, Adata, Vector{Char}(ctainds), id_op, Bdata, Vector{Char}(ctbinds), id_op, β, Cdata, Vector{Char}(ctcinds), id_op, id_op; algo=algo)
+      else
+          # loop through all algos
+          # pick the fastest one
+          # store that plan!
+          best_time = 1e6
+          best_plan = nothing
+          best_algo = nothing
+          max_algos = Ref{Int32}(C_NULL)
+          CuArrays.CUTENSOR.cutensorContractionMaxAlgos(max_algos)
+          # fix once the other options are documented
+          #algos = collect(Cint(CuArrays.CUTENSOR.CUTENSOR_ALGO_GETT):Cint(max_algos[] - 1))
+          algos = collect(Cint(CuArrays.CUTENSOR.CUTENSOR_ALGO_GETT):Cint(-1))
+          for algo in reverse(algos)
+              try
+                  #this_plan = CuArrays.CUTENSOR.contraction_plan(Adata, Vector{Char}(ctainds), id_op, Bdata, Vector{Char}(ctbinds), id_op, Cdata, Vector{Char}(ctcinds), id_op, id_op; algo=CuArrays.CUTENSOR.cutensorAlgo_t(algo), pref=CuArrays.CUTENSOR.CUTENSOR_WORKSPACE_MAX)
+                  Cdata, this_time, bytes, gctime, memallocs = @timed CuArrays.CUTENSOR.contraction!(α, Adata, Vector{Char}(ctainds), id_op, Bdata, Vector{Char}(ctbinds), id_op, β, Cdata, Vector{Char}(ctcinds), id_op, id_op; algo=CuArrays.CUTENSOR.cutensorAlgo_t(algo))
+                  if this_time < best_time
+                      best_time = this_time
+                      #best_plan = this_plan
+                      best_algo = CuArrays.CUTENSOR.cutensorAlgo_t(algo)
+                  end
+              catch err
+                  @warn "Algorithm $algo not supported"
+              end
+          end
+          ContractionPlans[dict_key] = best_algo
+      end
+  else
+      Cdata = CuArrays.CUTENSOR.contraction!(α, Adata, Vector{Char}(ctainds), id_op, Bdata, Vector{Char}(ctbinds), id_op, β, Cdata, Vector{Char}(ctcinds), id_op, id_op)
+  end
+  return parent(Cdata)
 end
 
 function Base.:+(B::CuDenseTensor, A::CuDenseTensor)
@@ -227,8 +240,39 @@ function Base.:+(B::CuDenseTensor, A::CuDenseTensor)
 end
 
 function Base.:+(B::CuDense, Bis::IndexSet, A::CuDense, Ais::IndexSet)
+  opA  = CUTENSOR.CUTENSOR_OP_IDENTITY
   opC  = CUTENSOR.CUTENSOR_OP_IDENTITY
   opAC = CUTENSOR.CUTENSOR_OP_ADD
+  ind_dict = Vector{Index}()
+  for (idx, i) in enumerate(Ais)
+      push!(ind_dict, i)
+  end
+  Adata = data(A)
+  Bdata = data(B)
+  reshapeBdata = reshape(Bdata,dims(Bis))
+  reshapeAdata = reshape(Adata,dims(Ais))
+  ctainds = zeros(Int, length(Ais))
+  ctbinds = zeros(Int, length(Bis))
+  for (ii, ia) in enumerate(Ais)
+      ctainds[ii] = findfirst(x->x==ia, ind_dict)
+  end
+  for (ii, ib) in enumerate(Bis)
+      ctbinds[ii] = findfirst(x->x==ib, ind_dict)
+  end
+  ctcinds = copy(ctbinds)
+  C = CuArrays.zeros(eltype(Bdata), dims(Bis))
+  Cis = Bis
+  C = CUTENSOR.elementwiseBinary!(1, reshapeAdata, ctainds, opA, 1, reshapeBdata, ctbinds, opC, C, ctcinds, opAC)
+  copyto!(data(B), vec(C))
+  return C
+end
+
+function Base.:-(B::CuDenseTensor, A::CuDenseTensor)
+  opC  = CUTENSOR.CUTENSOR_OP_IDENTITY
+  opA  = CUTENSOR.CUTENSOR_OP_IDENTITY
+  opAC = CUTENSOR.CUTENSOR_OP_ADD
+  Ais = inds(A)
+  Bis = inds(B)
   ind_dict = Vector{Index}()
   for (idx, i) in enumerate(inds(A))
       push!(ind_dict, i)
@@ -245,9 +289,38 @@ function Base.:+(B::CuDense, Bis::IndexSet, A::CuDense, Ais::IndexSet)
   for (ii, ib) in enumerate(Bis)
       ctbinds[ii] = findfirst(x->x==ib, ind_dict)
   end
-  C = zeros(Bdata)
+  ctcinds = copy(ctbinds)
+  C = CuArrays.zeros(eltype(Bdata), dims(Bis))
+  CUTENSOR.elementwiseBinary!(one(eltype(Adata)), reshapeAdata, ctainds, opA, -one(eltype(Bdata)), reshapeBdata, ctbinds, opC, C, ctcinds, opAC)
+  copyto!(data(store(B)), vec(C))
+  return B
+end
+
+function Base.:-(A::CuDense, Ais::IndexSet, B::CuDense, Bis::IndexSet)
+  opA  = CUTENSOR.CUTENSOR_OP_IDENTITY
+  opC  = CUTENSOR.CUTENSOR_OP_IDENTITY
+  opAC = CUTENSOR.CUTENSOR_OP_ADD
+  ind_dict = Vector{Index}()
+  for (idx, i) in enumerate(Ais)
+      push!(ind_dict, i)
+  end
+  Adata = data(A)
+  Bdata = data(B)
+  reshapeBdata = reshape(Bdata,dims(Bis))
+  reshapeAdata = reshape(Adata,dims(Ais))
+  ctainds = zeros(Int, length(Ais))
+  ctbinds = zeros(Int, length(Bis))
+  for (ii, ia) in enumerate(Ais)
+      ctainds[ii] = findfirst(x->x==ia, ind_dict)
+  end
+  for (ii, ib) in enumerate(Bis)
+      ctbinds[ii] = findfirst(x->x==ib, ind_dict)
+  end
+  ctcinds = copy(ctbinds)
+  C = CuArrays.zeros(eltype(Bdata), dims(Bis))
   Cis = Bis
-  C = CUTENSOR.elementwiseBinary!(1, Adata, ctainds, opA, 1, Bdata, Binds, opC, C, Cis, opAC)
+  C = CUTENSOR.elementwiseBinary!(one(eltype(Adata)), reshapeAdata, ctainds, opA, -one(eltype(Bdata)), reshapeBdata, ctbinds, opC, C, ctcinds, opAC)
+  copyto!(data(B), vec(C))
   return C
 end
 
@@ -272,7 +345,6 @@ function Base.permute!(B::CuDenseTensor, A::CuDenseTensor)
   end
   
   CuArrays.CUTENSOR.permutation!(one(eltype(Adata)), reshapeAdata, Vector{Char}(ctainds), reshapeBdata, Vector{Char}(ctbinds)) 
-  #copyto!(B.store.data, reshape(reshapeBdata, length(B.store.data)))
   return vec(reshapeBdata) 
 end
 
@@ -295,7 +367,6 @@ function Base.permute!(B::CuDense, Bis::IndexSet, A::CuDense, Ais::IndexSet)
   end
   
   CuArrays.CUTENSOR.permutation!(one(eltype(Adata)), reshapeAdata, Vector{Char}(ctainds), reshapeBdata, Vector{Char}(ctbinds)) 
-  #copyto!(B.store.data, reshape(reshapeBdata, length(B.store.data)))
   return vec(reshapeBdata) 
 end
 

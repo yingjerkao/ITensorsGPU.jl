@@ -1,13 +1,13 @@
 function cuMPO(O::MPO)
     P = copy(O)
     for site in 1:length(O)
-        P.A_[site] = cuITensor(O.A_[site])
+        P.data[site] = cuITensor(O.data[site])
     end
     return P 
 end
 cuMPO() = MPO()
   
-cuMPO(N::Int, A::Vector{ITensor}) = cuMPO(MPO(N, A))
+cuMPO(A::Vector{ITensor}) = cuMPO(MPO(A))
 cuMPO(sites) = cuMPO(MPO(sites))
 function plussers(::Type{T}, left_ind::Index, right_ind::Index, sum_ind::Index) where {T <: CuArray}
     #if dir(left_ind) == dir(right_ind) == Neither
@@ -38,8 +38,8 @@ function randomCuMPO(sites, m::Int=1)
 end
 
 function Base.collect(M::T) where {T <: Union{MPS, MPO}}
-    if typeof(tensor(tensors(M)[1])) <: CuDenseTensor
-        return T(length(M), collect.(tensors(M)), M.llim_, M.rlim_)    
+    if typeof(tensor(ITensors.data(M)[1])) <: CuDenseTensor
+        return T(collect.(ITensors.data(M)), M.llim, M.rlim)    
     else
         return M
     end

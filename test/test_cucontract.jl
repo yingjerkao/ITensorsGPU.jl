@@ -33,10 +33,16 @@ using ITensors,
     @testset "Test contract cuITensor (Scalar*Scalar -> Scalar)" begin
       C = A*B
       @test scalar(C)≈scalar(A)*scalar(B)
+      C = cuITensor(T(2.0))*cuITensor(T(2.0))
+      @test scalar(C)≈T(4.0)
     end
     @testset "Test contract cuITensor (Scalar*Vector -> Vector)" begin
       C = A*Ai
       @test collect(C)≈scalar(A)*collect(Ai)
+      C = cuITensor(T(2.0))*Ai
+      @test collect(C)≈T(2.0)*collect(Ai)
+      C = Ai*cuITensor(T(2.0))
+      @test collect(C)≈T(2.0)*collect(Ai)
     end
     @testset "Test contract cuITensor (Vector*Scalar -> Vector)" begin
       C = Aj*A
@@ -47,12 +53,11 @@ using ITensors,
       Ccollect = collect(Ai) * collect(Bi) 
       @test scalar(Ccollect)≈scalar(C)
     end
-    #TODO: need to add back this outer product test
-    #@testset "Test contract cuITensors (Vector*Vectorᵀ -> Matrix)" begin
-    #  C = Ai*Aj
-    #  Ccollect = collect(Ai)*transpose(collect(Aj))
-    #  @test Ccollect≈collect(permute(C,i,j))
-    #end
+    @testset "Test contract cuITensors (Vector*Vectorᵀ -> Matrix)" begin
+      C = Ai*Aj
+      Ccollect = collect(Ai)*collect(Aj)
+      @test Ccollect≈collect(permute(C,i,j))
+    end
     @testset "Test contract cuITensors (Matrix*Scalar -> Matrix)" begin
       Aij = permute(Aij,i,j)
       C = Aij*A

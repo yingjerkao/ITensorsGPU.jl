@@ -10,13 +10,12 @@ function Base.:*(T1::Tensor{ElT1,2,StoreT1,IndsT1},
                  T2::Tensor{ElT2,2,StoreT2,IndsT2}) where
                                         {ElT1,StoreT1<:CuDense,IndsT1,
                                         ElT2,StoreT2<:CuDense,IndsT2}
-  println("hi")
   RM    = matrix(T1)*matrix(T2)
   indsR = IndsT1(ind(T1,1),ind(T2,2))
   pT    = promote_type(ElT1,ElT2)
   return Tensor(Dense(vec(RM)),indsR)
 end
-
+#= FIX ME
 function LinearAlgebra.exp(T::CuDenseTensor{ElT,2}) where {ElT,IndsT}
   expTM = exp(matrix(T))
   return Tensor(Dense(vec(expTM)),inds(T))
@@ -28,6 +27,7 @@ function expHermitian(T::CuDenseTensor{ElT,2}) where {ElT,IndsT}
   expTM = parent(exp(Hermitian(matrix(T))))
   return Tensor(Dense(vec(expTM)),inds(T))
 end
+=#
 
 # svd of an order-2 tensor
 function LinearAlgebra.svd(T::CuDenseTensor{ElT,2,IndsT}; kwargs...) where {ElT,IndsT}
@@ -37,7 +37,10 @@ function LinearAlgebra.svd(T::CuDenseTensor{ElT,2,IndsT}; kwargs...) where {ElT,
   absoluteCutoff::Bool = get(kwargs,:absoluteCutoff,false)
   doRelCutoff::Bool = get(kwargs,:doRelCutoff,true)
   fastSVD::Bool = get(kwargs,:fastSVD,false)
-  MU,MS,MV = CUSOLVER.svd(array(T))
+  aT = array(T)
+  @timeit "CUSOLVER svd" begin
+      MU,MS,MV = CUSOLVER.svd!(aT)
+  end
   #conj!(MV)
   P = MS.^2
   truncerr, docut, P = truncate!(P;mindim=mindim,
@@ -63,29 +66,33 @@ function LinearAlgebra.svd(T::CuDenseTensor{ElT,2,IndsT}; kwargs...) where {ElT,
   Sdata      = CuArrays.zeros(ElT, dS * dS)
   dsi        = diagind(reshape(Sdata, dS, dS), 0)
   Sdata[dsi] = MS
-  MV_ = CuArrays.zeros(ElT, length(MV))
-  copyto!(MV_, vec(MV))
+  #MV_ = CuArrays.zeros(ElT, length(MV))
+  #copyto!(MV_, vec(MV))
   S = Tensor(Dense(Sdata),Sinds)
-  V = Tensor(Dense(MV_),Vinds)
+  V = Tensor(Dense(vec(MV)),Vinds)
   return U,S,V,spec
 end
 
-function eigenHermitian(T::CuDenseTensor{ElT,2,IndsT};
-                        kwargs...) where {ElT,IndsT}
+function LinearAlgebra.eigen(T::Hermitian{ElT,<:CuDenseTensor{ElT,2,IndsT}};
+                        kwargs...) where {ElT<:Union{Real,Complex},IndsT}
   ispossemidef::Bool = get(kwargs,:ispossemidef,false)
   maxdim::Int = get(kwargs,:maxdim,minimum(dims(T)))
   mindim::Int = get(kwargs,:mindim,1)
   cutoff::Float64 = get(kwargs,:cutoff,0.0)
   absoluteCutoff::Bool = get(kwargs,:absoluteCutoff,false)
   doRelCutoff::Bool = get(kwargs,:doRelCutoff,true)
-  local DM, UM 
-  if ElT <: Complex
-    DM, UM = CUSOLVER.heevd!('V', 'U', matrix(T))
-  else
-    DM, UM = CUSOLVER.syevd!('V', 'U', matrix(T))
+  @timeit "CUSOLVER eigen" begin
+      local DM, UM
+      if ElT <: Complex
+          DM, UM = CUSOLVER.heevd!('V', 'U', matrix(parent(T)))
+      else
+          DM, UM = CUSOLVER.syevd!('V', 'U', matrix(parent(T)))
+      end
   end
   DM_ = reverse(DM)
-  truncerr, docut, DM = truncate!(DM_;maxdim=maxdim, cutoff=cutoff, absoluteCutoff=absoluteCutoff, doRelCutoff=doRelCutoff)
+  @timeit "truncate" begin
+      truncerr, docut, DM = truncate!(DM_;maxdim=maxdim, cutoff=cutoff, absoluteCutoff=absoluteCutoff, doRelCutoff=doRelCutoff)
+  end
   spec = Spectrum(DM,truncerr)
   dD = length(DM)
   dV = reverse(UM, dims=2)
@@ -94,15 +101,15 @@ function eigenHermitian(T::CuDenseTensor{ElT,2,IndsT};
       dV = CuMatrix(dV[:,1:dD])
   end
   # Make the new indices to go onto U and V
-  u = eltype(IndsT)(dD)
-  v = eltype(IndsT)(dD)
-  Uinds = IndsT((ind(T,1),u))
-  Dinds = IndsT((u,v))
-  dV_ = CuArrays.zeros(ElT, length(dV))
-  copyto!(dV_, vec(dV))
-  U = Tensor(Dense(dV_),Uinds)
+  l = eltype(IndsT)(dD)
+  r = eltype(IndsT)(dD)
+  Vinds = IndsT((dag(ind(T, 2)), dag(r)))
+  Dinds = IndsT((l, dag(r)))
+  #dV_ = CuArrays.zeros(ElT, length(dV))
+  #copyto!(dV_, vec(dV))
+  U = Tensor(Dense(vec(dV)),Vinds)
   D = Tensor(Diag(real.(DM)),Dinds)
-  return U,D,spec
+  return D,U,spec
 end
 
 function LinearAlgebra.qr(T::CuDenseTensor{ElT,2,IndsT}) where {ElT,IndsT}
@@ -113,12 +120,12 @@ function LinearAlgebra.qr(T::CuDenseTensor{ElT,2,IndsT}) where {ElT,IndsT}
   Qinds = IndsT((ind(T,1),q))
   Rinds = IndsT((q,ind(T,2)))
   QM = CuMatrix(QM)
-  Q_ = CuArrays.zeros(ElT, length(QM))
-  R_ = CuArrays.zeros(ElT, length(RM))
-  copyto!(Q_, vec(QM))
-  copyto!(R_, vec(RM))
-  Q = Tensor(Dense(Q_),Qinds)
-  R = Tensor(Dense(R_),Rinds)
+  #Q_ = CuArrays.zeros(ElT, length(QM))
+  #R_ = CuArrays.zeros(ElT, length(RM))
+  #copyto!(Q_, vec(QM))
+  #copyto!(R_, vec(RM))
+  Q = Tensor(Dense(vec(QM)),Qinds)
+  R = Tensor(Dense(vec(RM)),Rinds)
   return Q,R
 end
 

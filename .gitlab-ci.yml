@@ -1,0 +1,34 @@
+include:
+      - 'https://raw.githubusercontent.com/JuliaGPU/gitlab-ci/master/templates/v6.yml'
+
+test:1.4:
+  extends:
+    - .julia:1.4
+    - .test
+  tags:
+    - nvidia
+    - sm_70
+  image: nvidia/cuda:latest
+  script:
+    - julia --project -e 'using Pkg; Pkg.develop(PackageSpec(url="https://github.com/ITensor/ITensors.jl.git"));'
+    - julia --project -e 'using Pkg; Pkg.develop(["CuArrays", "GPUArrays", "CUDAdrv", "CUDAnative", "CUDAapi", "GPUCompiler"]);'
+    - julia --project -e 'using Pkg; Pkg.test("ITensorsGPU"; coverage=true)'
+
+test:nightly:
+  extends:
+    - .julia:nightly
+    - .test
+  tags:
+    - nvidia
+    - sm_70
+  image: nvidia/cuda:latest
+  script:
+    - julia --project -e 'using Pkg; Pkg.develop(PackageSpec(url="https://github.com/ITensor/ITensors.jl.git"));'
+    - julia --project -e 'using Pkg; Pkg.develop(["CuArrays", "GPUArrays", "CUDAdrv", "CUDAnative", "CUDAapi", "GPUCompiler"]);'
+    - julia --project -e 'using Pkg; Pkg.test("ITensorsGPU")'
+  allow_failure: true
+
+coverage:
+  extends:
+    - .julia:nightly
+    - .coverage
